@@ -1,0 +1,142 @@
+# !pip install pandas
+# !pip install bs4
+# !pip install zipfile
+# !pip install os
+# !pip install openai
+# !pip install PyPDF2
+
+import pandas as pd
+from bs4 import BeautifulSoup
+import zipfile
+import os
+import openai
+import time
+import pickle
+import PyPDF2
+from google.colab import drive
+
+drive.mount('/content/drive')
+
+output_save_interval = 2  # Save output after every 2 files.
+processed_files_count = 0
+
+def html_to_text(html_path):
+    with open(html_path, 'r', encoding='utf-8') as file:
+        soup = BeautifulSoup(file, 'html.parser')
+        text = soup.get_text()
+    return text
+
+def read_pdf(pdf_path):
+    with open(pdf_path, 'rb') as file:
+        pdf_reader = PyPDF2.PdfFileReader(file)
+        text = ""
+        for page_num in range(pdf_reader.numPages):
+            page = pdf_reader.getPage(page_num)
+            text += page.extractText()
+    return text
+
+def extract_experiment_section(text):
+    start_keyword = "INTRODUCTION"
+    end_keyword = "DISCUSSION"
+    start_index = text.find(start_keyword)
+    end_index = text.find(end_keyword)
+
+    if start_index != -1 and end_index != -1:
+        return text[start_index:end_index]
+    else:
+        return None
+
+def load_processed_files_list():
+    try:
+        with open('processed_files_list.pkl', 'rb') as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        return []
+
+def save_processed_files_list(processed_files):
+    with open('processed_files_list.pkl', 'wb') as f:
+        pickle.dump(processed_files, f)
+
+api_keys = ['random', 'random', 'random']
+api_key_index = 0
+openai.api_key = api_keys[api_key_index]
+
+prompt = """
+Prompt: Experimental Design and Recruitment
+
+Please write a detailed description of your experiment's design, recruitment process, and essential parameters. Include the following information:
+
+Number of Participants and Recruitment Method:
+Describe the total number of participants involved in the experiment.
+Explain how these participants were recruited. Mention any specific criteria used for participant selection (e.g., age, gender, expertise, etc.).
+
+Number of Tasks:
+Specify the total number of tasks or activities presented to the participants during the experiment.
+
+Type of Experiment:
+Indicate the type of experiment conducted. It could be a user study, interview-based study, controlled lab experiment, online survey, etc. Please provide a brief explanation of why this experimental approach was chosen.
+
+Experimental Variables:
+Identify and describe the experimental variables used in the study. This includes both independent variables (factors) and their respective levels.
+If applicable, clarify any control variables considered to minimize confounding effects.
+
+Number of Trials:
+State the total number of trials or repetitions for each task, if applicable.
+"""
+
+#zip_path = '/content/drive/MyDrive/Colab Notebooks/unzipped-justTestZIP.zip'
+unzip_dir = '/content/drive/MyDrive/Colab Notebooks/unzipped-justTest/'
+output_df = pd.DataFrame(columns=['HTML Name', 'Output'])
+
+processed_files = load_processed_files_list()
+
+for filename in os.listdir(unzip_dir):
+    if filename not in processed_files:
+        file_path = os.path.join(unzip_dir, filename)
+        
+        if filename.endswith('.html'):
+            text_content = html_to_text(file_path)
+        elif filename.endswith('.pdf'):
+            text_content = read_pdf(file_path)
+        elif filename.endswith('.zip'):
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                for zipped_name in zip_ref.namelist():
+                    with zip_ref.open(zipped_name) as file:
+                        soup = BeautifulSoup(file, 'html.parser')
+                        text_content = soup.get_text()
+        else:
+            continue
+
+        experiment_section = extract_experiment_section(text_content)
+
+        if experiment_section is not None:
+            combined_prompt = prompt + "\n\n" + "Extracted Text:" + "\n" + experiment_section
+            combined_prompt = combined_prompt[:4097]
+
+            while True:
+                try:
+                    response = openai.Completion.create(
+                        engine="text-davinci-003",
+                        prompt=combined_prompt,
+                        max_tokens=500
+                    )
+                    break
+                except openai.error.RateLimitError:
+                    print("Rate limit reached for API key {}. Switching to next API key...".format(api_keys[api_key_index]))
+                    api_key_index = (api_key_index + 1) % len(api_keys)
+                    openai.api_key = api_keys[api_key_index]
+                    time.sleep(60)
+
+            new_row = pd.DataFrame({'HTML Name': [filename], 'Output': [response.choices[0].text.strip()]})
+        else:
+            new_row = pd.DataFrame({'HTML Name': [filename], 'Output': ["No Experiment section found in the text."]})
+
+        output_df = pd.concat([output_df, new_row], ignore_index=True)
+        processed_files.append(filename)
+        save_processed_files_list(processed_files)
+        processed_files_count += 1
+
+        if processed_files_count % output_save_interval == 0:
+            output_df.to_excel('/content/drive/MyDrive/Colab Notebooks/outputTest.xlsx', index=False)
+
+output_df.to_excel('/content/drive/MyDrive/Colab Notebooks/outputTest.xlsx', index=False)
